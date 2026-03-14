@@ -1,4 +1,4 @@
-﻿#include <windows.h>
+#include <windows.h>
 #include <atomic>
 #include <mmsystem.h>
 #include <string>
@@ -26,16 +26,17 @@ WNDPROC g_OldEditProc;
 std::atomic<bool> g_clicking(false), g_running(true);
 std::atomic<double> g_interval(10.0);
 int g_lastExitDay = -1, g_lastExitHour = -1, g_lastExitMin = -1;
-// ウィンドウ初期位置（デフォルトはOS任せ）
 int g_winX = CW_USEDEFAULT, g_winY = CW_USEDEFAULT;
 
 // --- 関数: 設定の保存 ---
 void SaveSettings(HWND hWnd) {
+    // 【修正点】最小化されている場合は座標を更新せずに終了
+    if (IsIconic(hWnd)) return;
+
     SetFileAttributesA("settings.dat", FILE_ATTRIBUTE_NORMAL);
 
     std::ofstream ofs("settings.dat", std::ios::out | std::ios::trunc);
     if (ofs.is_open()) {
-        // ウィンドウの現在の位置を取得
         RECT rect;
         GetWindowRect(hWnd, &rect);
 
@@ -52,7 +53,6 @@ void SaveSettings(HWND hWnd) {
 
         int autoStatus = (SendMessage(g_hRadioOn, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0;
 
-        // 保存（1行ずつ。上から 座標X, 座標Y, 間隔, 時, 分, 有効設定...）
         ofs << rect.left << "\n";
         ofs << rect.top << "\n";
         ofs << intervalA << "\n";
@@ -67,15 +67,13 @@ void SaveSettings(HWND hWnd) {
     }
 }
 
-// --- 関数: 設定の読み込み ---
 // --- 関数: 設定の読み込み (安全装置付き) ---
 void LoadSettings() {
     std::ifstream ifs("settings.dat");
 
-    // ファイルが開けない、または中身が空の場合は、デフォルト値をセットして終了
     if (!ifs.is_open() || ifs.peek() == std::ifstream::traits_type::eof()) {
-        SetWindowTextA(g_hEditInterval, "10");
-        SetWindowTextA(g_hEditHour, "12");
+        SetWindowTextA(g_hEditInterval, "10.0");
+        SetWindowTextA(g_hEditHour, "17");
         SetWindowTextA(g_hEditMin, "00");
         SendMessage(g_hRadioOff, BM_SETCHECK, BST_CHECKED, 1);
         return;
@@ -84,15 +82,14 @@ void LoadSettings() {
     std::string sX, sY, interval, h, m, autoStatus, lDay, lHour, lMin;
 
     try {
-        // 1行ずつ慎重に読み込み、失敗したらデフォルト値を使う
         if (std::getline(ifs, sX)) g_winX = std::stoi(sX);
         if (std::getline(ifs, sY)) g_winY = std::stoi(sY);
 
         if (std::getline(ifs, interval)) SetWindowTextA(g_hEditInterval, interval.c_str());
-        else SetWindowTextA(g_hEditInterval, "10");
+        else SetWindowTextA(g_hEditInterval, "10.0");
 
         if (std::getline(ifs, h)) SetWindowTextA(g_hEditHour, h.c_str());
-        else SetWindowTextA(g_hEditHour, "12");
+        else SetWindowTextA(g_hEditHour, "17");
 
         if (std::getline(ifs, m)) SetWindowTextA(g_hEditMin, m.c_str());
         else SetWindowTextA(g_hEditMin, "00");
@@ -108,16 +105,14 @@ void LoadSettings() {
         if (std::getline(ifs, lMin)) g_lastExitMin = std::stoi(lMin);
     }
     catch (...) {
-        // 読み込み中にエラー（stoi失敗など）が出たら、変な値を入れずにデフォルトへ
-        SetWindowTextA(g_hEditInterval, "10");
-        SetWindowTextA(g_hEditHour, "12");
+        SetWindowTextA(g_hEditInterval, "10.0");
+        SetWindowTextA(g_hEditHour, "17");
         SetWindowTextA(g_hEditMin, "00");
     }
-
     ifs.close();
 }
 
-// --- 補助関数 ---
+// --- 補助関数・サブクラス化 ---
 void AdjustValue(HWND hWnd, int delta, int maxVal) {
     int val = GetDlgItemInt(GetParent(hWnd), (int)GetWindowLongPtr(hWnd, GWLP_ID), NULL, FALSE);
     val += (delta > 0) ? 1 : -1;
@@ -143,6 +138,7 @@ LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM
     return CallWindowProc(g_OldEditProc, hWnd, message, wParam, lParam);
 }
 
+// --- スレッド処理 ---
 DWORD WINAPI ExitMonitorThread(LPVOID lpParam) {
     HWND hWnd = (HWND)lpParam;
     while (g_running) {
@@ -177,6 +173,7 @@ DWORD WINAPI ClickThread(LPVOID lpParam) {
     return 0;
 }
 
+// --- メインウィンドウプロシージャ ---
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_CREATE: {
@@ -193,16 +190,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         g_hEditMin = CreateWindow(L"EDIT", L"00", WS_VISIBLE | WS_CHILD | WS_BORDER | ES_CENTER, 195, 53, 40, 25, hWnd, (HMENU)ID_EDIT_MIN, hInst, NULL);
         g_hRadioOn = CreateWindow(L"BUTTON", L"有効", WS_VISIBLE | WS_CHILD | BS_AUTORADIOBUTTON, 140, 85, 50, 20, hWnd, (HMENU)ID_RADIO_ON, hInst, NULL);
         g_hRadioOff = CreateWindow(L"BUTTON", L"無効", WS_VISIBLE | WS_CHILD | BS_AUTORADIOBUTTON, 195, 85, 50, 20, hWnd, (HMENU)ID_RADIO_OFF, hInst, NULL);
+
         g_OldEditProc = (WNDPROC)SetWindowLongPtr(g_hEditHour, GWLP_WNDPROC, (LONG_PTR)EditSubclassProc);
         SetWindowLongPtr(g_hEditMin, GWLP_WNDPROC, (LONG_PTR)EditSubclassProc);
         SetWindowLongPtr(g_hEditInterval, GWLP_WNDPROC, (LONG_PTR)EditSubclassProc);
+
         CreateWindow(L"STATIC", L"F9:開始 / F10:停止 / ESC:終了", WS_VISIBLE | WS_CHILD, 20, 115, 250, 20, hWnd, NULL, hInst, NULL);
         LoadSettings();
         break;
     }
     case WM_COMMAND:
-        if (LOWORD(wParam) == IDM_FILE_EXIT) { PostMessage(hWnd, WM_CLOSE, 0, 0); }
-        if (LOWORD(wParam) == IDM_HELP_INFO) MessageBox(hWnd, L"Auto Clicker v1.1\n\n@tybob8010\nhttps://tybob8010.github.io", L"バージョン", MB_OK);
+        if (LOWORD(wParam) == IDM_FILE_EXIT) PostMessage(hWnd, WM_CLOSE, 0, 0);
+        if (LOWORD(wParam) == IDM_HELP_INFO) MessageBox(hWnd, L"Auto Clicker v.1.1.1\n\n@tybob8010\nhttps://tybob8010.github.io", L"バージョン", MB_OK);
         break;
     case WM_HOTKEY:
         if (wParam == ID_HOTKEY_START) {
@@ -212,14 +211,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             g_clicking = true;
         }
         else if (wParam == ID_HOTKEY_STOP) g_clicking = false;
-        else if (wParam == ID_HOTKEY_EXIT) { PostMessage(hWnd, WM_CLOSE, 0, 0); }
+        else if (wParam == ID_HOTKEY_EXIT) PostMessage(hWnd, WM_CLOSE, 0, 0);
         break;
     case WM_CLOSE:
-        SaveSettings(hWnd); // 位置を保存
+        SaveSettings(hWnd);
         DestroyWindow(hWnd);
         break;
     case WM_DESTROY:
-        SaveSettings(hWnd); // 念のためここでも保存
+        SaveSettings(hWnd);
         g_running = false;
         PostQuitMessage(0);
         break;
@@ -229,11 +228,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     return 0;
 }
 
+// --- エントリポイント ---
 int APIENTRY wWinMain(_In_ HINSTANCE h, _In_opt_ HINSTANCE p, _In_ LPWSTR c, _In_ int n) {
     timeBeginPeriod(1);
     hInst = h;
 
-    // アイコン読み込み
     HICON hIconLarge = (HICON)LoadImage(h, MAKEINTRESOURCE(128), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR);
     HICON hIconSmall = (HICON)LoadImage(h, MAKEINTRESOURCE(128), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
 
@@ -249,10 +248,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE h, _In_opt_ HINSTANCE p, _In_ LPWSTR c, _In
 
     if (!RegisterClassExW(&wcex)) return 0;
 
-    // --- ここで先に設定を読み込んで座標を更新する ---
-    // 一時的な非表示ウィンドウを作らずに済むよう、初期化前にダミーでLoadSettingsを呼び出せる仕組みにします
-    // ※今回はWndProc内のWM_CREATEでLoadを呼んでいますが、
-    // ウィンドウ作成時の座標に反映させるため、wWinMainで一度設定ファイルを直接覗きます
+    // 起動時の座標読み込み
     {
         std::ifstream ifs("settings.dat");
         if (ifs.is_open()) {
@@ -265,7 +261,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE h, _In_opt_ HINSTANCE p, _In_ LPWSTR c, _In
         }
     }
 
-    HWND hWnd = CreateWindowExW(WS_EX_TOPMOST, L"AutoClicker", L"Auto Clicker v1.1",
+    // もし -32000 (最小化座標) が保存されていた場合の保険
+    if (g_winX < -10000) g_winX = CW_USEDEFAULT;
+    if (g_winY < -10000) g_winY = CW_USEDEFAULT;
+
+    HWND hWnd = CreateWindowExW(WS_EX_TOPMOST, L"AutoClicker", L"Auto Clicker v.1.1.1",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         g_winX, g_winY, 300, 210, NULL, NULL, h, NULL);
 
